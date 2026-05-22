@@ -23,6 +23,15 @@ static inline u8 io_read(GB* gb, u16 addr) {
         return (u8)(gb->io[idx] | 0xE0);
     }
 
+    if (idx == 0x26) { // NR52
+        u8 status = 0x70;
+        if (gb->io[0x26] & 0x80) status |= 0x80;
+        for (int i = 0; i < 4; i++) {
+            if (gb->apu.channel_enabled[i]) status |= (u8)(1u << i);
+        }
+        return status;
+    }
+
     return gb->io[idx];
 }
 
@@ -58,6 +67,9 @@ static inline void io_write(GB* gb, u16 addr, u8 v) {
         } break;
         default:
             gb->io[idx] = v;
+            if (idx >= 0x10 && idx <= 0x3F) {
+                apu_io_write(gb, idx, v);
+            }
             break;
     }
 }
@@ -150,3 +162,4 @@ void mmu_write16(GB* gb, u16 addr, u16 v) {
     mmu_write8(gb, addr, lo8(v));
     mmu_write8(gb, (u16)(addr + 1), hi8(v));
 }
+
