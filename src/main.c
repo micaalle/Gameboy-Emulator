@@ -17,6 +17,12 @@
 #define GBEMU_DEFAULT_SCALE 6
 #endif
 
+
+static double perf_now_ms(void) {
+    return (double)SDL_GetPerformanceCounter() * 1000.0 /
+           (double)SDL_GetPerformanceFrequency();
+}
+
 static void set_button(GB* gb, bool is_dpad, int bit, bool pressed) {
 
     u8* group = is_dpad ? &gb->joyp_dpad : &gb->joyp_buttons;
@@ -66,17 +72,34 @@ int main(int argc, char** argv) {
     );
     if (!tex) die("SDL_CreateTexture failed: %s", SDL_GetError());
 
+    SDL_AudioSpec want;
+    SDL_zero(want);
+    want.freq = APU_SAMPLE_RATE;
+    want.format = AUDIO_S16SYS;
+    want.channels = 2;
+    want.samples = 1024;
+    want.callback = NULL; // queue-based audio
+
+    SDL_AudioDeviceID audio_dev = SDL_OpenAudioDevice(NULL, 0, &want, NULL, 0);
+    if (audio_dev == 0) {
+        fprintf(stderr, "Audio disabled: SDL_OpenAudioDevice failed: %s\n", SDL_GetError());
+    } else {
+        SDL_PauseAudioDevice(audio_dev, 0);
+    }
+
     bool running = true;
     bool fps_cap = true;
     bool esc_armed = false;
     u32  esc_time_ms = 0;
 
-    const u32 target_ms = 1000 / 60;
-    u32 last_tick = SDL_GetTicks();
-    u32 fps_last = last_tick;
+    // real DMG frame timing: 70224 CPU cycles per frame at 4194304 Hz.
+    // this is about 59.7275 FPS 
+    const double target_frame_ms = 1000.0 * 70224.0 / 4194304.0;
+    double fps_last = perf_now_ms();
     int fps_frames = 0;
 
     while (running) {
+        double frame_start_ms = perf_now_ms();
         u32 loop_now = SDL_GetTicks();
         if (esc_armed && (loop_now - esc_time_ms) > 1500) {
             esc_armed = false;
@@ -144,6 +167,18 @@ int main(int argc, char** argv) {
 
         gb_run_frame(&gb);
 
+        if (audio_dev != 0) {
+            int frames = apu_samples_available(&gb.apu);
+            if (frames > 0) {
+                Uint32 queued = SDL_GetQueuedAudioSize(audio_dev);
+                if (queued < (Uint32)(APU_SAMPLE_RATE / 5 * 2 * sizeof(s16))) {
+                    SDL_QueueAudio(audio_dev, apu_samples_data(&gb.apu),
+                                   (Uint32)(frames * 2 * sizeof(s16)));
+                }
+                apu_clear_samples(&gb.apu);
+            }
+        }
+
         void* pixels = NULL;
         int pitch = 0;
         if (SDL_LockTexture(tex, NULL, &pixels, &pitch) != 0) {
@@ -160,16 +195,21 @@ int main(int argc, char** argv) {
         SDL_RenderPresent(renderer);
 
 
-        u32 now = SDL_GetTicks();
-        u32 frame_ms = now - last_tick;
-        last_tick = now;
+        if (fps_cap) {
+            double elapsed_ms = perf_now_ms() - frame_start_ms;
+            if (elapsed_ms < target_frame_ms) {
+                SDL_Delay((Uint32)(target_frame_ms - elapsed_ms));
+            }
 
-        if (fps_cap && frame_ms < target_ms) {
-            SDL_Delay(target_ms - frame_ms);
+            // delay for sound creep
+            while ((perf_now_ms() - frame_start_ms) < target_frame_ms) {
+                SDL_Delay(0);
+            }
         }
 
+        double now = perf_now_ms();
         fps_frames++;
-        if (now - fps_last >= 1000) {
+        if (now - fps_last >= 1000.0) {
             char t[160];
             snprintf(t, sizeof(t), "%s  |  %d FPS  | cap:%s",
                      win_title, fps_frames, fps_cap ? "on" : "off");
@@ -179,6 +219,8 @@ int main(int argc, char** argv) {
         }
     }
 
+    if (audio_dev != 0) SDL_CloseAudioDevice(audio_dev);
+
     SDL_DestroyTexture(tex);
     SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);
@@ -187,3 +229,4 @@ int main(int argc, char** argv) {
     gb_free(&gb);
     return 0;
 }
+
